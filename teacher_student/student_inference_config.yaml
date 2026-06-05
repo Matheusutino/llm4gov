@@ -1,4 +1,8 @@
-# student_inference_config.yaml (minimal)
+# student_inference_config.yaml (recent text-only Unsloth)
+model:
+  family: "qwen3"
+  model_name: "unsloth/Qwen3-4B"
+
 model_path: "lora_model"          # LoRA dir or merged model dir
 max_seq_length: 8192              # only exposed inference param (besides batch)
 max_new_tokens: 1024

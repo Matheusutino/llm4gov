@@ -139,24 +139,7 @@ Após gerar o conjunto rotulado, treinamos um modelo estudante mais leve.  O scr
 
 O arquivo `student_fine_tuning_config.yaml` possui diversas seções:
 
-* `model`: define o nome do modelo base (e.g. `unsloth/Phi-3.5-mini-instruct`), o tamanho máximo de sequência (`max_seq_length`), o tipo de _dtype_ e se o modelo deve ser carregado em 4 bits. Atualmente, o **LLM4Gov** é funcionado para os **modelos estudantes** abaixo, mas em princípio qualquer modelo disponível no **Unsloth** pode ser utilizado, desde que sejam feitos os devidos ajustes no script de ajuste fino (`student_fine_tuning.py`):
-
-    ```python
-    "unsloth/Meta-Llama-3.1-8B-bnb-4bit",      
-    "unsloth/Meta-Llama-3.1-8B-Instruct-bnb-4bit",
-    "unsloth/Meta-Llama-3.1-70B-bnb-4bit",
-    "unsloth/Meta-Llama-3.1-405B-bnb-4bit",    # 405B também disponível em 4bit!
-    "unsloth/Mistral-Nemo-Base-2407-bnb-4bit", # Novo Mistral 12B, 2x mais rápido!
-    "unsloth/Mistral-Nemo-Instruct-2407-bnb-4bit",
-    "unsloth/mistral-7b-v0.3-bnb-4bit",        # Mistral v3, 2x mais rápido!
-    "unsloth/mistral-7b-instruct-v0.3-bnb-4bit",
-    "unsloth/Phi-3.5-mini-instruct",           # Phi-3.5, 2x mais rápido!
-    "unsloth/Phi-3-medium-4k-instruct",
-    "unsloth/gemma-2-9b-bnb-4bit",
-    "unsloth/gemma-2-27b-bnb-4bit"             # Gemma, 2x mais rápido!
-
-
-
+* `model`: define a família recente do modelo (`family`, por exemplo `qwen3`, `gemma3` ou `ministral3`), o nome do modelo base (por exemplo `unsloth/Qwen3-4B`), o tamanho máximo de sequência (`max_seq_length`), o tipo de _dtype_ e se o modelo deve ser carregado em 4 bits. Esta versão do **LLM4Gov** não dá mais suporte aos modelos estudantes legados; o fluxo foi atualizado para usar o `chat_template` nativo dos modelos recentes da Unsloth.
 * `lora`: parâmetros do LoRA, como a dimensão interna `r`, os módulos alvo (`target_modules`), `lora_alpha` e `lora_dropout`.
 * `train_args`: hiperparâmetros de treinamento, incluindo tamanho de lote (`per_device_train_batch_size`), número de passos ou épocas, taxa de aprendizado e diretório de saída.
 * `save`: especifica onde salvar os adaptadores LoRA (`save_lora_dir`) e se devem ser gerados modelos combinados (16 ou 4 bits) ou arquivos GGUF.
@@ -176,6 +159,8 @@ Ajuste esses parâmetros conforme seus recursos de hardware e tamanho do dataset
 Durante o processo, o script:
 
 * Carrega o modelo base com quantização de 4 bits.
+* Converte cada exemplo rotulado em uma conversa com papéis `system`, `user` e `assistant`.
+* Aplica o `chat_template` nativo do tokenizer antes do treinamento.
 * Anexa as camadas LoRA com as configurações especificadas.
 * Treina o modelo usando o `SFTTrainer` da biblioteca TRL.
 * Salva os adaptadores LoRA e, se configurado, versões fundidas ou quantizadas.
@@ -186,6 +171,7 @@ O tempo de treinamento depende do tamanho do conjunto e da GPU. As mensagens de 
 
 Com o modelo estudante treinado, podemos gerar respostas para novos documentos.  O script `student_inference.py` carrega o modelo LoRA e processa exemplos em lote.  As configurações estão no arquivo `student_inference_config.yaml`:
 
+* `model.family`: identifica a família recente do modelo usada pelo fluxo conversacional.
 * `model_path`: diretório onde os adaptadores LoRA ou modelo fundido foram salvos (por padrão, `lora_model`). 
 * `max_seq_length`: tamanho máximo de contexto na entrada.
 * `max_new_tokens`: limite de tokens que o modelo pode gerar (ajuste conforme a tarefa e a GPU disponível).
@@ -202,6 +188,7 @@ python student_inference.py --config student_inference_config.yaml
 O script realiza os seguintes passos:
 
 * Carrega o modelo LoRA em 4 bits.
+* Monta a entrada como conversa `system` + `user` e aplica o `chat_template` nativo do tokenizer.
 * Gera as respostas usando decodificação determinística (sem amostragem).  Após a geração, tenta converter a resposta em JSON; se não for possível, mantém como texto bruto.
 * Escreve as saídas em `output_file` com os campos `system_prompt`, `user_prompt` e `student_output`.
 

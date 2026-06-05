@@ -2,7 +2,8 @@ log_level: "INFO"
 log_file: "logs/student_finetune.log"
 
 model:
-  model_name: "unsloth/Phi-3.5-mini-instruct"
+  family: "qwen3"
+  model_name: "unsloth/Qwen3-4B"
   max_seq_length: 8192
   dtype: null            # "float16", "bfloat16" ou null
   load_in_4bit: true

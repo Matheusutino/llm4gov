@@ -1,0 +1,15 @@
+.venv/
+
+# Python caches
+__pycache__/
+*.py[cod]
+
+# teacher_student runtime artifacts
+teacher_student/logs/
+teacher_student/outputs/
+teacher_student/lora_model/
+teacher_student/model_merged_16bit/
+teacher_student/model_merged_4bit/
+teacher_student/model_gguf/
+teacher_student/traindata_debug.json
+teacher_student/unsloth_compiled_cache/

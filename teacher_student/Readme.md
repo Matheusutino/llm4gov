@@ -139,7 +139,7 @@ Após gerar o conjunto rotulado, treinamos um modelo estudante mais leve.  O scr
 
 O arquivo `student_fine_tuning_config.yaml` possui diversas seções:
 
-* `model`: define a família recente do modelo (`family`, por exemplo `qwen3`, `gemma3` ou `ministral3`), o nome do modelo base (por exemplo `unsloth/Qwen3-4B`), o tamanho máximo de sequência (`max_seq_length`), o tipo de _dtype_ e se o modelo deve ser carregado em 4 bits. Esta versão do **LLM4Gov** não dá mais suporte aos modelos estudantes legados; o fluxo foi atualizado para usar o `chat_template` nativo dos modelos recentes da Unsloth.
+* `model`: define a família recente do modelo (`family`, por exemplo `qwen3`, `gemma4` ou `ministral3`; aliases com hífen como `gemma-4` também são aceitos), o nome do modelo base (por exemplo `unsloth/Qwen3-4B`), o tamanho máximo de sequência (`max_seq_length`), o tipo de _dtype_ e se o modelo deve ser carregado em 4 bits. Esta versão do **LLM4Gov** não dá mais suporte aos modelos estudantes legados; o fluxo foi atualizado para usar o `chat_template` nativo dos modelos recentes da Unsloth.
 * `lora`: parâmetros do LoRA, como a dimensão interna `r`, os módulos alvo (`target_modules`), `lora_alpha` e `lora_dropout`.
 * `train_args`: hiperparâmetros de treinamento, incluindo tamanho de lote (`per_device_train_batch_size`), número de passos ou épocas, taxa de aprendizado e diretório de saída.
 * `save`: especifica onde salvar os adaptadores LoRA (`save_lora_dir`) e se devem ser gerados modelos combinados (16 ou 4 bits) ou arquivos GGUF.

@@ -1,25 +1,5 @@
 """
-Student fine-tuning using recent text-only Unsloth models and chat templates.
-
-Input:
-  - YAML config (student_fine_tuning_config.yaml)
-  - JSON or JSONL labeled dataset with records:
-        {
-          "system_prompt": "...",
-          "user_prompt": {... or "..."},
-          "teacher_output": "... or {...}"
-        }
-
-This script:
-  - Loads config
-  - Loads and validates dataset
-  - Converts each record into structured chat messages
-  - Applies the tokenizer's native chat template
-  - Trains with SFTTrainer
-  - Saves LoRA and optional merged / GGUF artifacts
-
-Run:
-  python student_fine_tuning.py --config student_fine_tuning_config.yaml
+Student fine-tuning using recent Unsloth models, including vision-capable backends.
 """
 
 import argparse
@@ -31,15 +11,22 @@ import sys
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Union
 
+from unsloth import FastLanguageModel, FastVisionModel
 import torch
 import yaml
 from datasets import Dataset
 from trl import SFTConfig, SFTTrainer
-from unsloth import FastLanguageModel
+
+try:
+    from unsloth.trainer import UnslothVisionDataCollator
+except Exception:  # pragma: no cover
+    UnslothVisionDataCollator = None
 
 from student_modeling import (
     apply_training_chat_template,
     build_training_messages,
+    get_text_tokenizer,
+    uses_vision_backend,
     validate_model_family,
 )
 
@@ -52,7 +39,6 @@ def setup_logger(log_level: str = "INFO", log_file: Optional[str] = None) -> log
     fmt = logging.Formatter(
         "[%(asctime)s] [%(levelname)s] %(name)s: %(message)s", datefmt="%Y-%m-%d %H:%M:%S"
     )
-
     sh = logging.StreamHandler(sys.stdout)
     sh.setFormatter(fmt)
     logger.addHandler(sh)
@@ -62,7 +48,6 @@ def setup_logger(log_level: str = "INFO", log_file: Optional[str] = None) -> log
         fh = logging.FileHandler(log_file, encoding="utf-8")
         fh.setFormatter(fmt)
         logger.addHandler(fh)
-
     return logger
 
 
@@ -79,10 +64,7 @@ class ModelConfig:
 @dataclass
 class LoraConfig:
     r: int = 16
-    target_modules: List[str] = field(default_factory=lambda: [
-        "q_proj", "k_proj", "v_proj", "o_proj",
-        "gate_proj", "up_proj", "down_proj",
-    ])
+    target_modules: Union[str, List[str]] = "all-linear"
     lora_alpha: int = 16
     lora_dropout: float = 0.0
     bias: str = "none"
@@ -90,6 +72,11 @@ class LoraConfig:
     random_state: int = 3407
     use_rslora: bool = False
     loftq_config: Optional[Any] = None
+    finetune_vision_layers: bool = False
+    finetune_language_layers: bool = True
+    finetune_attention_modules: bool = True
+    finetune_mlp_modules: bool = True
+    modules_to_save: Optional[List[str]] = field(default_factory=lambda: ["lm_head", "embed_tokens"])
 
 
 @dataclass
@@ -114,6 +101,9 @@ class TrainArgsConfig:
 class TrainerConfig:
     packing: bool = False
     dataset_text_field: str = "text"
+    train_on_responses_only: bool = False
+    instruction_part: Optional[str] = None
+    response_part: Optional[str] = None
 
 
 @dataclass
@@ -181,7 +171,6 @@ def read_labeled_data(path: str, logger: logging.Logger) -> List[Dict[str, Any]]
 
     ext = os.path.splitext(path)[1].lower()
     data: List[Dict[str, Any]] = []
-
     if ext == ".jsonl":
         with open(path, "r", encoding="utf-8") as f:
             for i, line in enumerate(f, 1):
@@ -191,7 +180,7 @@ def read_labeled_data(path: str, logger: logging.Logger) -> List[Dict[str, Any]]
                 try:
                     data.append(json.loads(line))
                 except Exception as exc:
-                    logger.error(f"Invalid JSONL at line {i}: {exc}")
+                    logger.error("Invalid JSONL at line %d: %s", i, exc)
     elif ext == ".json":
         with open(path, "r", encoding="utf-8") as f:
             try:
@@ -207,11 +196,11 @@ def read_labeled_data(path: str, logger: logging.Logger) -> List[Dict[str, Any]]
     filtered = []
     for idx, rec in enumerate(data):
         if not isinstance(rec, dict):
-            logger.warning(f"Skipping non-dict record at index {idx}.")
+            logger.warning("Skipping non-dict record at index %d.", idx)
             continue
         missing = required - set(rec.keys())
         if missing:
-            logger.warning(f"Skipping record {idx}: missing keys {missing}")
+            logger.warning("Skipping record %d: missing keys %s", idx, missing)
             continue
         filtered.append(rec)
 
@@ -221,35 +210,41 @@ def read_labeled_data(path: str, logger: logging.Logger) -> List[Dict[str, Any]]
 
 def to_message_examples(
     records: List[Dict[str, Any]],
+    *,
     max_examples: Optional[int],
     logger: logging.Logger,
+    multimodal_format: bool,
+    base_dir: str | None,
 ) -> Dataset:
     if max_examples is not None:
         records = records[:max_examples]
 
-    message_rows: List[List[Dict[str, str]]] = []
+    message_rows: List[List[Dict[str, Any]]] = []
     drop_count = 0
-
     for i, rec in enumerate(records):
         try:
-            message_rows.append(build_training_messages(rec))
+            message_rows.append(
+                build_training_messages(rec, multimodal_format=multimodal_format, base_dir=base_dir)
+            )
         except Exception as exc:
             drop_count += 1
-            logger.error(f"Dropping record {i} due to conversion error: {exc}")
+            logger.error("Dropping record %d due to conversion error: %s", i, exc)
 
     if drop_count:
         logger.warning("Dropped %d problematic records during conversion.", drop_count)
-
     return Dataset.from_dict({"messages": message_rows})
 
 
-def build_texts_from_messages(ds: Dataset, tokenizer: Any, logger: logging.Logger) -> Dataset:
+def build_texts_from_messages(ds: Dataset, processor_or_tokenizer: Any, logger: logging.Logger) -> Dataset:
     def _format(batch):
         return {
-            "text": [apply_training_chat_template(tokenizer, messages) for messages in batch["messages"]]
+            "text": [
+                apply_training_chat_template(processor_or_tokenizer, messages)
+                for messages in batch["messages"]
+            ]
         }
 
-    logger.info("Formatting dataset with tokenizer chat template...")
+    logger.info("Formatting dataset with chat template...")
     return ds.map(_format, batched=True)
 
 
@@ -258,7 +253,8 @@ class StudentFineTuner:
         self.cfg = cfg
         self.logger = logger
         self.model = None
-        self.tokenizer = None
+        self.processor = None
+        self.is_vision_backend = uses_vision_backend(cfg.model.family)
 
     def load_model(self):
         m = self.cfg.model
@@ -271,7 +267,8 @@ class StudentFineTuner:
             elif lowered in ("bfloat16", "bf16"):
                 dtype = torch.bfloat16
 
-        self.model, self.tokenizer = FastLanguageModel.from_pretrained(
+        loader = FastVisionModel if self.is_vision_backend else FastLanguageModel
+        self.model, self.processor = loader.from_pretrained(
             model_name=m.model_name,
             max_seq_length=m.max_seq_length,
             dtype=dtype,
@@ -281,8 +278,8 @@ class StudentFineTuner:
 
         lora = self.cfg.lora
         self.logger.info("Attaching LoRA adapters...")
-        self.model = FastLanguageModel.get_peft_model(
-            self.model,
+        peft_loader = FastVisionModel if self.is_vision_backend else FastLanguageModel
+        peft_kwargs = dict(
             r=lora.r,
             target_modules=lora.target_modules,
             lora_alpha=lora.lora_alpha,
@@ -293,26 +290,43 @@ class StudentFineTuner:
             use_rslora=lora.use_rslora,
             loftq_config=lora.loftq_config,
         )
-        if hasattr(FastLanguageModel, "for_training"):
-            FastLanguageModel.for_training(self.model)
+        if self.is_vision_backend:
+            peft_kwargs.update(
+                finetune_vision_layers=lora.finetune_vision_layers,
+                finetune_language_layers=lora.finetune_language_layers,
+                finetune_attention_modules=lora.finetune_attention_modules,
+                finetune_mlp_modules=lora.finetune_mlp_modules,
+                modules_to_save=lora.modules_to_save,
+            )
+        self.model = peft_loader.get_peft_model(self.model, **peft_kwargs)
+        if hasattr(peft_loader, "for_training"):
+            peft_loader.for_training(self.model)
 
     def prepare_dataset(self) -> Dataset:
-        recs = read_labeled_data(self.cfg.data.labeled_file, self.logger)
-        ds = to_message_examples(recs, self.cfg.data.max_examples, self.logger)
-        ds = build_texts_from_messages(ds, self.tokenizer, self.logger)
+        labeled_file = self.cfg.data.labeled_file
+        recs = read_labeled_data(labeled_file, self.logger)
+        base_dir = os.path.dirname(os.path.abspath(labeled_file))
+        ds = to_message_examples(
+            recs,
+            max_examples=self.cfg.data.max_examples,
+            logger=self.logger,
+            multimodal_format=self.is_vision_backend,
+            base_dir=base_dir,
+        )
+        if not self.is_vision_backend:
+            ds = build_texts_from_messages(ds, self.processor, self.logger)
         self.logger.info("Prepared dataset with %d samples.", len(ds))
 
         debug_path = "traindata_debug.json"
         self.logger.info("Saving debug dataset to %s", debug_path)
         os.makedirs(os.path.dirname(debug_path) or ".", exist_ok=True)
         with open(debug_path, "w", encoding="utf-8") as f:
-            json.dump(ds.to_dict(), f, ensure_ascii=False, indent=2)
+            json.dump(ds.to_dict(), f, ensure_ascii=False, indent=2, default=str)
         return ds
 
     def train(self, ds: Dataset):
         targs = self.cfg.train_args
         tcfg = self.cfg.trainer
-
         set_global_seed(targs.seed)
 
         sft_kwargs = {
@@ -334,29 +348,54 @@ class StudentFineTuner:
             sft_kwargs["num_train_epochs"] = targs.num_train_epochs
         if targs.max_grad_norm is not None:
             sft_kwargs["max_grad_norm"] = targs.max_grad_norm
+        if self.is_vision_backend:
+            sft_kwargs["remove_unused_columns"] = False
+            sft_kwargs["dataset_kwargs"] = {"skip_prepare_dataset": True}
+            sft_kwargs["max_length"] = self.cfg.model.max_seq_length
 
         trainer_init = {
             "model": self.model,
             "train_dataset": ds,
-            "dataset_text_field": tcfg.dataset_text_field,
-            "max_seq_length": self.cfg.model.max_seq_length,
-            "packing": tcfg.packing,
             "args": SFTConfig(**sft_kwargs),
         }
 
+        if self.is_vision_backend:
+            if UnslothVisionDataCollator is None:
+                raise RuntimeError(
+                    "UnslothVisionDataCollator is unavailable in this environment. "
+                    "Upgrade `unsloth` to a version with multimodal trainer support."
+                )
+            trainer_init["data_collator"] = UnslothVisionDataCollator(
+                self.model,
+                self.processor,
+                train_on_responses_only=tcfg.train_on_responses_only,
+                instruction_part=tcfg.instruction_part,
+                response_part=tcfg.response_part,
+            )
+            trainer_init["processing_class"] = self.processor
+        else:
+            trainer_init.update(
+                dataset_text_field=tcfg.dataset_text_field,
+                max_seq_length=self.cfg.model.max_seq_length,
+                packing=tcfg.packing,
+            )
+            try:
+                trainer_init["processing_class"] = get_text_tokenizer(self.processor)
+            except Exception:
+                trainer_init["tokenizer"] = get_text_tokenizer(self.processor)
+
         self.logger.info("Initializing SFTTrainer...")
         try:
-            trainer = SFTTrainer(processing_class=self.tokenizer, **trainer_init)
+            trainer = SFTTrainer(**trainer_init)
         except TypeError:
-            trainer = SFTTrainer(tokenizer=self.tokenizer, **trainer_init)
+            processing_class = trainer_init.pop("processing_class", None)
+            if processing_class is not None:
+                trainer_init["tokenizer"] = processing_class
+            trainer = SFTTrainer(**trainer_init)
 
         if torch.cuda.is_available():
             gpu_props = torch.cuda.get_device_properties(0)
-            self.logger.info(
-                "GPU: %s | %.2f GB total",
-                gpu_props.name,
-                round(gpu_props.total_memory / 1024 ** 3, 2),
-            )
+            self.logger.info("GPU: %s | %.2f GB total", gpu_props.name, round(gpu_props.total_memory / 1024**3, 2))
 
         self.logger.info("Starting training...")
         stats = trainer.train()
@@ -365,75 +404,41 @@ class StudentFineTuner:
 
     def save_artifacts(self):
         save_cfg = self.cfg.save
+        save_target = self.processor if hasattr(self.processor, "save_pretrained") else get_text_tokenizer(self.processor)
+        tokenizer = get_text_tokenizer(self.processor)
         self.logger.info("Saving LoRA adapters to: %s", save_cfg.save_lora_dir)
         os.makedirs(save_cfg.save_lora_dir, exist_ok=True)
         self.model.save_pretrained(save_cfg.save_lora_dir)
-        self.tokenizer.save_pretrained(save_cfg.save_lora_dir)
+        save_target.save_pretrained(save_cfg.save_lora_dir)
 
         if save_cfg.push_to_hub and save_cfg.hf_repo and save_cfg.hf_token:
             self.logger.info("Pushing LoRA adapters to Hub: %s", save_cfg.hf_repo)
             try:
                 self.model.push_to_hub(save_cfg.hf_repo, token=save_cfg.hf_token)
-                self.tokenizer.push_to_hub(save_cfg.hf_repo, token=save_cfg.hf_token)
+                if hasattr(save_target, "push_to_hub"):
+                    save_target.push_to_hub(save_cfg.hf_repo, token=save_cfg.hf_token)
             except Exception as exc:
                 self.logger.error("Failed to push LoRA to Hub: %s", exc)
 
         if save_cfg.save_merged_16bit:
-            self.logger.info("Merging and saving 16-bit model...")
-            out_dir = "model_merged_16bit"
             try:
-                self.model.save_pretrained_merged(out_dir, self.tokenizer, save_method="merged_16bit")
+                self.model.save_pretrained_merged("model_merged_16bit", tokenizer, save_method="merged_16bit")
             except Exception as exc:
                 self.logger.error("Failed 16-bit merge save: %s", exc)
-            if save_cfg.push_to_hub and save_cfg.hf_repo and save_cfg.hf_token:
-                try:
-                    self.model.push_to_hub_merged(
-                        save_cfg.hf_repo,
-                        self.tokenizer,
-                        save_method="merged_16bit",
-                        token=save_cfg.hf_token,
-                    )
-                except Exception as exc:
-                    self.logger.error("Failed to push 16-bit merged to Hub: %s", exc)
-
         if save_cfg.save_merged_4bit:
-            self.logger.info("Merging and saving 4-bit model...")
-            out_dir = "model_merged_4bit"
             try:
-                self.model.save_pretrained_merged(out_dir, self.tokenizer, save_method="merged_4bit")
+                self.model.save_pretrained_merged("model_merged_4bit", tokenizer, save_method="merged_4bit")
             except Exception as exc:
                 self.logger.error("Failed 4-bit merge save: %s", exc)
-            if save_cfg.push_to_hub and save_cfg.hf_repo and save_cfg.hf_token:
-                try:
-                    self.model.push_to_hub_merged(
-                        save_cfg.hf_repo,
-                        self.tokenizer,
-                        save_method="merged_4bit",
-                        token=save_cfg.hf_token,
-                    )
-                except Exception as exc:
-                    self.logger.error("Failed to push 4-bit merged to Hub: %s", exc)
-
         if save_cfg.save_gguf:
-            self.logger.info("Saving GGUF with quantization '%s'...", save_cfg.save_gguf)
             try:
                 self.model.save_pretrained_gguf(
                     "model_gguf",
-                    self.tokenizer,
+                    tokenizer,
                     quantization_method="f16" if save_cfg.save_gguf == "f16" else save_cfg.save_gguf,
                 )
             except Exception as exc:
                 self.logger.error("Failed GGUF save: %s", exc)
-            if save_cfg.push_to_hub and save_cfg.hf_repo and save_cfg.hf_token:
-                try:
-                    self.model.push_to_hub_gguf(
-                        save_cfg.hf_repo,
-                        self.tokenizer,
-                        quantization_method=save_cfg.save_gguf,
-                        token=save_cfg.hf_token,
-                    )
-                except Exception as exc:
-                    self.logger.error("Failed to push GGUF to Hub: %s", exc)
 
     def run(self):
         self.load_model()
@@ -444,9 +449,7 @@ class StudentFineTuner:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description="Student fine-tuning (recent Unsloth text models) from Teacher-labeled data."
-    )
+    parser = argparse.ArgumentParser(description="Student fine-tuning with recent Unsloth models.")
     parser.add_argument("--config", type=str, required=True, help="Path to student_fine_tuning_config.yaml")
     return parser.parse_args()
 

@@ -1,7 +1,7 @@
-# student_inference_config.yaml (recent text-only Unsloth)
+# student_inference_config.yaml (recent Unsloth model)
 model:
-  family: "qwen3"
-  model_name: "unsloth/Qwen3-4B"
+  family: "gemma4"
+  model_name: "unsloth/gemma-4-E2B-it"
 
 model_path: "lora_model"          # LoRA dir or merged model dir
 max_seq_length: 8192              # only exposed inference param (besides batch)

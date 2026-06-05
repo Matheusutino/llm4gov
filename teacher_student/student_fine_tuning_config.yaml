@@ -2,8 +2,8 @@ log_level: "INFO"
 log_file: "logs/student_finetune.log"
 
 model:
-  family: "qwen3"
-  model_name: "unsloth/Qwen3-4B"
+  family: "gemma4"
+  model_name: "unsloth/gemma-4-E2B-it"
   max_seq_length: 8192
   dtype: null            # "float16", "bfloat16" ou null
   load_in_4bit: true
@@ -11,7 +11,7 @@ model:
 
 lora:
   r: 16
-  target_modules: ["q_proj","k_proj","v_proj","o_proj","gate_proj","up_proj","down_proj"]
+  target_modules: "all-linear"
   lora_alpha: 16
   lora_dropout: 0.0
   bias: "none"
@@ -19,6 +19,11 @@ lora:
   random_state: 3407
   use_rslora: false
   loftq_config: null
+  finetune_vision_layers: false
+  finetune_language_layers: true
+  finetune_attention_modules: true
+  finetune_mlp_modules: true
+  modules_to_save: ["lm_head", "embed_tokens"]
 
 train_args:
   per_device_train_batch_size: 2
@@ -39,6 +44,9 @@ train_args:
 trainer:
   packing: false
   dataset_text_field: "text"
+  train_on_responses_only: false
+  instruction_part: null
+  response_part: null
 
 save:
   save_lora_dir: "lora_model"

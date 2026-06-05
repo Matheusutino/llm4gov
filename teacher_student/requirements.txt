@@ -1,4 +1,22 @@
 fastrlock
+
+# Core HF / Unsloth stack pinned to a Gemma 4 compatible combination.
+torch==2.10.0
+transformers==5.5.0
+tokenizers==0.22.2
+huggingface-hub==1.18.0
+datasets==4.3.0
+trl==0.22.2
+unsloth==2026.6.1
+unsloth_zoo==2026.6.1
+torchao>=0.16.0
+nest-asyncio
+
+# Multimodal helpers required by the recent Gemma 4 / VLM flow.
+timm
+Pillow
+
+# Existing project dependencies.
 langchain
 langchain-community
 langchain-core
@@ -9,7 +27,3 @@ pydantic
 pydantic-settings
 pydantic_core
 sentence-transformers
-transformers
-trl
-unsloth
-unsloth_zoo
